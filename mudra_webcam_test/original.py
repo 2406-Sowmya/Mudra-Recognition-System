@@ -85,6 +85,37 @@ DEFAULT_MODEL_PATH = PROJECT_DIR / "models" / "mudra_mobilenetv2_final.keras"
 DEFAULT_CLASS_NAMES_PATH = PROJECT_DIR / "models" / "class_names.json"
 DEFAULT_HAND_LANDMARKER_PATH = PROJECT_DIR / "hand_landmarker.task"
 IMAGE_SIZE = (224, 224)
+SAMYUKTHA_HASTHA_MUDRAS = {
+    "Anjali",
+    "Berunda",
+    "Chakra",
+    "Garuda",
+    "Kapotham",
+    "Karkatta",
+    "Kartariswastika",
+    "Katakavardhana",
+    "Khatva",
+    "Kilaka",
+    "Kurma",
+    "Matsya",
+    "Nagabandha",
+    "Pasha",
+    "Pushpaputa",
+    "Sakata",
+    "Samputa",
+    "Shanka",
+    "Shivalinga",
+    "Swastikam",
+    "Varaha",
+}
+
+
+def infer_hasta_category(label: str, detected_hands: Optional[int] = None) -> str:
+    if label in SAMYUKTHA_HASTHA_MUDRAS:
+        return "Samyuktha Hastha"
+    if detected_hands is not None and detected_hands >= 2:
+        return "Samyuktha Hastha"
+    return "Asamyuktha Hastha"
 
 
 def _strip_quantization_config(value):
@@ -121,6 +152,7 @@ def _load_model_with_legacy_quantization_fix(model_path: Path):
 @dataclass
 class PredictionResult:
     label: str
+    hasta_category: str
     confidence: float
     scores: np.ndarray
     class_names: list[str]
@@ -195,13 +227,15 @@ class MudraRecognizer:
 
         return batch, resized
 
-    def predict(self, image_bgr: np.ndarray) -> tuple[PredictionResult, np.ndarray]:
+    def predict(self, image_bgr: np.ndarray, detected_hands: Optional[int] = None) -> tuple[PredictionResult, np.ndarray]:
         batch, processed_preview = self.preprocess(image_bgr)
         scores = self.model.predict(batch, verbose=0)[0]
         best_index = int(np.argmax(scores))
         confidence = float(scores[best_index])
+        label = self.class_names[best_index]
         return PredictionResult(
-            label=self.class_names[best_index],
+            label=label,
+            hasta_category=infer_hasta_category(label, detected_hands),
             confidence=confidence,
             scores=scores,
             class_names=self.class_names,
@@ -258,7 +292,10 @@ class HandCropper:
             point = (int(landmark.x * width), int(landmark.y * height))
             cv2.circle(frame, point, 3, (0, 255, 255), -1)
 
-    def crop_hand(self, frame_bgr: np.ndarray) -> tuple[Optional[np.ndarray], Optional[tuple[int, int, int, int]], np.ndarray]:
+    def crop_hand(
+        self,
+        frame_bgr: np.ndarray,
+    ) -> tuple[Optional[np.ndarray], Optional[tuple[int, int, int, int]], np.ndarray, int]:
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
         if self.running_mode == VisionTaskRunningMode.VIDEO:
@@ -270,7 +307,8 @@ class HandCropper:
 
         if not result.hand_landmarks:
             self.previous_box = None
-            return None, None, annotated
+            return None, None, annotated, 0
+        hand_count = len(result.hand_landmarks)
 
         height, width = frame_bgr.shape[:2]
         all_xs = []
@@ -322,10 +360,10 @@ class HandCropper:
         self.previous_box = current_box
 
         if x2 <= x1 or y2 <= y1:
-            return None, None, annotated
+            return None, None, annotated, hand_count
 
         crop = frame_bgr[y1:y2, x1:x2]
-        return crop, (x1, y1, x2, y2), annotated
+        return crop, (x1, y1, x2, y2), annotated, hand_count
 
     def close(self) -> None:
         self.hands.close()
@@ -357,11 +395,21 @@ def draw_prediction(
             2,
             cv2.LINE_AA,
         )
+        cv2.putText(
+            display,
+            f"Type: {prediction.hasta_category}",
+            (20, 72),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 215, 0),
+            2,
+            cv2.LINE_AA,
+        )
         for i, (label, score) in enumerate(prediction.top_k(3), start=1):
             cv2.putText(
                 display,
                 f"{i}. {label}: {score * 100:.1f}%",
-                (20, 40 + i * 28),
+                (20, 72 + i * 28),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.65,
                 (255, 255, 255),
@@ -371,7 +419,7 @@ def draw_prediction(
     else:
         cv2.putText(
             display,
-            "Show one hand to the camera",
+            "Show one or two hands to the camera",
             (20, 40),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.9,
@@ -479,17 +527,19 @@ def main() -> None:
                 raise RuntimeError("Failed to read frame from webcam.")
 
             frame = cv2.flip(frame, 1)
-            hand_crop, box, annotated = cropper.crop_hand(frame)
+            hand_crop, box, annotated, hand_count = cropper.crop_hand(frame)
 
             prediction = None
             model_input_preview = None
             if hand_crop is not None:
-                current_prediction, model_input_preview = recognizer.predict(hand_crop)
+                current_prediction, model_input_preview = recognizer.predict(hand_crop, detected_hands=hand_count)
                 recent_scores.append(current_prediction.scores)
                 averaged_scores = np.mean(np.stack(recent_scores, axis=0), axis=0)
                 best_index = int(np.argmax(averaged_scores))
+                averaged_label = recognizer.class_names[best_index]
                 current_prediction = PredictionResult(
-                    label=recognizer.class_names[best_index],
+                    label=averaged_label,
+                    hasta_category=infer_hasta_category(averaged_label, hand_count),
                     confidence=float(averaged_scores[best_index]),
                     scores=averaged_scores,
                     class_names=recognizer.class_names,

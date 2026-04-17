@@ -13,6 +13,7 @@ from original import (
     HandCropper,
     MudraRecognizer,
     PredictionResult,
+    infer_hasta_category,
 )
 
 
@@ -186,11 +187,21 @@ def compose_display(
             2,
             cv2.LINE_AA,
         )
+        cv2.putText(
+            canvas,
+            f"Type: {prediction.hasta_category}",
+            (20, 92),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.72,
+            (255, 215, 0),
+            2,
+            cv2.LINE_AA,
+        )
         for i, (label, score) in enumerate(prediction.top_k(3), start=1):
             cv2.putText(
                 canvas,
                 f"{i}. {label}: {score * 100:.1f}%",
-                (20, 64 + i * 28),
+                (20, 92 + i * 28),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.65,
                 (255, 255, 255),
@@ -263,7 +274,7 @@ def main() -> None:
                 raise RuntimeError("Failed to read frame from webcam.")
 
             frame = cv2.flip(frame, 1)
-            hand_crop, box, annotated = cropper.crop_hand(frame)
+            hand_crop, box, annotated, hand_count = cropper.crop_hand(frame)
 
             segmented_preview = None
             model_input_preview = None
@@ -275,13 +286,18 @@ def main() -> None:
 
             if hand_crop is not None and hand_crop.size > 0:
                 segmented_preview, _ = segment_hand(hand_crop, args.method)
-                current_prediction, model_input_preview = recognizer.predict(segmented_preview)
+                current_prediction, model_input_preview = recognizer.predict(
+                    segmented_preview,
+                    detected_hands=hand_count,
+                )
                 recent_scores.append(current_prediction.scores)
 
                 averaged_scores = np.mean(np.stack(recent_scores, axis=0), axis=0)
                 best_index = int(np.argmax(averaged_scores))
+                averaged_label = recognizer.class_names[best_index]
                 current_prediction = PredictionResult(
-                    label=recognizer.class_names[best_index],
+                    label=averaged_label,
+                    hasta_category=infer_hasta_category(averaged_label, hand_count),
                     confidence=float(averaged_scores[best_index]),
                     scores=averaged_scores,
                     class_names=recognizer.class_names,
